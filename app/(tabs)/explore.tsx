@@ -1,0 +1,389 @@
+import { useEffect, useState } from 'react';
+import { Alert, Animated, Image, Platform, Pressable, StyleSheet, Text, TextInput } from 'react-native';
+import NfcManager, { NfcTech } from 'react-native-nfc-manager';
+
+import ParallaxScrollView from '@/components/parallax-scroll-view';
+import { ThemedText } from '@/components/themed-text';
+import { ThemedView } from '@/components/themed-view';
+import { IconSymbol } from '@/components/ui/icon-symbol';
+import { CUENTA_DESTINO_ID, SUPABASE_FUNCTION_URL, USER_ID_SOLICITANTE } from '@/config';
+import { Colors } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
+
+export default function CobrarScreen() {
+  const colorScheme = useColorScheme();
+  const [monto, setMonto] = useState('');
+  const [isScanning, setIsScanning] = useState(false);
+  const pulseAnim = useState(new Animated.Value(1))[0];
+  const [nfcEnabled, setNfcEnabled] = useState(false);
+
+  // Inicializar NFC al montar el componente
+  useEffect(() => {
+    let mounted = true;
+    const initNfc = async () => {
+      try {
+        if (Platform.OS === 'web') {
+          console.log('NFC no soportado en web');
+          return;
+        }
+
+        // Verificar si el módulo native está disponible antes de llamar a start
+        try {
+          await NfcManager.start();
+          if (mounted) setNfcEnabled(true);
+          console.log('NFC Manager inicializado correctamente');
+        } catch (e) {
+          console.warn('Error al iniciar NfcManager (posiblemente falta native module):', e);
+        }
+      } catch (error) {
+        console.warn('Fallo general en inicialización NFC:', error);
+      }
+    };
+
+    initNfc();
+
+    return () => {
+      mounted = false;
+      // Limpiar recursos
+      if (Platform.OS !== 'web') {
+        NfcManager.cancelTechnologyRequest().catch(() => { });
+      }
+    };
+  }, []);
+
+  // Animación de pulso
+  useEffect(() => {
+    if (isScanning) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.2, duration: 1000, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+        ])
+      ).start();
+
+      // Iniciar proceso de lectura
+      leerNFC();
+
+      return () => {
+        pulseAnim.setValue(1);
+        if (Platform.OS !== 'web') {
+          NfcManager.cancelTechnologyRequest().catch(() => { });
+        }
+      };
+    }
+  }, [isScanning]);
+
+  const leerNFC = async () => {
+    // Si NFC no inicializó correctamente, mostrar advertencia pero intentar continuar simulando o fallando gracefuly
+    if (!nfcEnabled && Platform.OS !== 'web') {
+      // Intentamos iniciar de nuevo por si acaso
+      try {
+        await NfcManager.start();
+        setNfcEnabled(true);
+      } catch (e) {
+        Alert.alert(
+          'Error de Entorno',
+          'El módulo NFC no está disponible. Si estás usando Expo Go, necesitas un "Development Build" para usar react-native-nfc-manager.\n\nError: ' + String(e)
+        );
+        setIsScanning(false);
+        return;
+      }
+    }
+
+    try {
+      console.log('Solicitando tecnología NFC...');
+      // Solicitar tecnología NFC
+      await NfcManager.requestTechnology(NfcTech.Ndef);
+
+      console.log('Esperando tag...');
+      const tag = await NfcManager.getTag();
+
+      console.log('Tag detectado:', tag);
+
+      // Usar las variables de configuración para la futura transacción
+      console.log('Preparando transacción con:', {
+        solicitante: USER_ID_SOLICITANTE,
+        destino: CUENTA_DESTINO_ID,
+        monto: monto,
+        endpoint: SUPABASE_FUNCTION_URL
+      });
+
+      // Preparar informe del tag
+      let reporteTag = '📱 NFC TAG LEÍDO\n\n';
+
+      if (tag) {
+        reporteTag += `ID: ${tag.id}\n`;
+        reporteTag += `Tech: ${JSON.stringify(tag.techTypes)}\n`;
+        reporteTag += `\nRaw Data:\n${JSON.stringify(tag, null, 2)}`;
+      } else {
+        reporteTag += 'Tag detectado es null/undefined';
+      }
+
+      setIsScanning(false);
+
+      Alert.alert(
+        '✅ Lectura Exitosa',
+        reporteTag + `\n\nDatos de transacción listos para: ${USER_ID_SOLICITANTE}`,
+        [{ text: 'OK', onPress: () => setMonto('') }],
+        { cancelable: false }
+      );
+
+    } catch (error: any) {
+      console.warn('Excepción en lectura NFC:', error);
+      setIsScanning(false);
+      pulseAnim.setValue(1);
+
+      const errMsg = String(error);
+      if (errMsg.includes('cancelled') || errMsg.includes('canceled')) {
+        console.log('Cancelado por usuario');
+      } else {
+        Alert.alert('Error NFC', `No se pudo leer el tag.\n\nDetalle: ${errMsg}`);
+      }
+    } finally {
+      NfcManager.cancelTechnologyRequest().catch(() => { });
+    }
+  };
+
+  const iniciarCobro = () => {
+    if (!monto || parseFloat(monto) <= 0) {
+      Alert.alert('Error', 'Por favor ingrese un monto válido');
+      return;
+    }
+    setIsScanning(true);
+  };
+
+  const cancelarCobro = () => {
+    setIsScanning(false);
+    pulseAnim.setValue(1);
+    NfcManager.cancelTechnologyRequest().catch(() => { });
+  };
+
+  return (
+    <ParallaxScrollView
+      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
+      headerImage={
+        <Image
+          source={require('@/assets/images/partial-react-logo.png')}
+          style={styles.reactLogo}
+        />
+      }>
+      <ThemedView style={styles.titleContainer}>
+        <ThemedText type="title">Cobrar 💵</ThemedText>
+      </ThemedView>
+
+      {!isScanning ? (
+        <ThemedView style={styles.formContainer}>
+          <ThemedText type="subtitle" style={styles.subtitle}>
+            Ingrese el monto a cobrar
+          </ThemedText>
+
+          <ThemedView style={styles.inputContainer}>
+            <ThemedText style={styles.currencySymbol}>$</ThemedText>
+            <TextInput
+              style={[
+                styles.input,
+                {
+                  color: Colors[colorScheme ?? 'light'].text,
+                  borderColor: Colors[colorScheme ?? 'light'].tabIconDefault,
+                },
+              ]}
+              placeholder="0.00"
+              placeholderTextColor={Colors[colorScheme ?? 'light'].tabIconDefault}
+              value={monto}
+              onChangeText={setMonto}
+              keyboardType="decimal-pad"
+              maxLength={10}
+            />
+          </ThemedView>
+
+          <Pressable
+            style={({ pressed }) => [
+              styles.button,
+              pressed && styles.buttonPressed,
+            ]}
+            onPress={iniciarCobro}>
+            <IconSymbol size={24} name="arrow.right.circle.fill" color="#fff" />
+            <Text style={styles.buttonText}>Iniciar Cobro</Text>
+          </Pressable>
+
+          <ThemedView style={styles.infoContainer}>
+            <IconSymbol size={20} name="info.circle" color={Colors[colorScheme ?? 'light'].icon} />
+            <ThemedText style={styles.infoText}>
+              Ingrese el monto y presione "Iniciar Cobro" para escanear la pulsera.
+            </ThemedText>
+          </ThemedView>
+
+          <ThemedView style={{ marginTop: 10, padding: 10, backgroundColor: '#f0f0f0', borderRadius: 8 }}>
+            <Text style={{ fontSize: 10, color: '#666' }}>
+              Configuración: {USER_ID_SOLICITANTE.substring(0, 8)}... → {CUENTA_DESTINO_ID.substring(0, 8)}...
+            </Text>
+          </ThemedView>
+        </ThemedView>
+      ) : (
+        <ThemedView style={styles.scanningContainer}>
+          <Animated.View style={[styles.nfcIconContainer, { transform: [{ scale: pulseAnim }] }]}>
+            <IconSymbol
+              size={120}
+              name="wave.3.right"
+              color={Colors[colorScheme ?? 'light'].tint}
+            />
+          </Animated.View>
+
+          <ThemedText type="subtitle" style={styles.scanningTitle}>
+            Esperando pulsera NFC...
+          </ThemedText>
+
+          <ThemedText style={styles.scanningText}>
+            Acerque el dispositivo para leer
+          </ThemedText>
+
+          <ThemedView style={styles.montoDisplay}>
+            <ThemedText style={styles.montoLabel}>Monto a cobrar:</ThemedText>
+            <ThemedText type="title" style={styles.montoValue}>
+              ${monto}
+            </ThemedText>
+          </ThemedView>
+
+          <Pressable
+            style={({ pressed }) => [
+              styles.cancelButton,
+              { borderColor: Colors[colorScheme ?? 'light'].tabIconDefault },
+              pressed && styles.buttonPressed,
+            ]}
+            onPress={cancelarCobro}>
+            <IconSymbol
+              size={24}
+              name="xmark.circle.fill"
+              color={Colors[colorScheme ?? 'light'].tabIconDefault}
+            />
+            <ThemedText
+              style={[
+                styles.cancelButtonText,
+                { color: Colors[colorScheme ?? 'light'].tabIconDefault },
+              ]}>
+              Cancelar
+            </ThemedText>
+          </Pressable>
+        </ThemedView>
+      )}
+    </ParallaxScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  reactLogo: {
+    height: 178,
+    width: 290,
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+  },
+  titleContainer: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 24,
+  },
+  formContainer: {
+    gap: 24,
+  },
+  subtitle: {
+    marginBottom: 8,
+  },
+  inputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  currencySymbol: {
+    fontSize: 32,
+    fontWeight: 'bold',
+  },
+  input: {
+    flex: 1,
+    fontSize: 32,
+    fontWeight: 'bold',
+    borderBottomWidth: 2,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+  },
+  button: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    marginTop: 16,
+    backgroundColor: '#0a7ea4',
+  },
+  buttonPressed: {
+    opacity: 0.7,
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  infoContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(128, 128, 128, 0.1)',
+  },
+  infoText: {
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  scanningContainer: {
+    alignItems: 'center',
+    gap: 24,
+    paddingVertical: 32,
+  },
+  nfcIconContainer: {
+    marginVertical: 32,
+  },
+  scanningTitle: {
+    textAlign: 'center',
+  },
+  scanningText: {
+    textAlign: 'center',
+    fontSize: 16,
+  },
+  montoDisplay: {
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 24,
+    paddingHorizontal: 32,
+    borderRadius: 12,
+    backgroundColor: 'rgba(10, 126, 164, 0.1)',
+    minWidth: 200,
+  },
+  montoLabel: {
+    fontSize: 14,
+    opacity: 0.7,
+  },
+  montoValue: {
+    fontSize: 48,
+    fontWeight: 'bold',
+  },
+  cancelButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    marginTop: 16,
+    backgroundColor: 'transparent',
+  },
+  cancelButtonText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+});
