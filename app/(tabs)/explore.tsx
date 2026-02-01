@@ -1,15 +1,14 @@
+import * as Haptics from 'expo-haptics';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Image, Platform, Pressable, StyleSheet, Text, TextInput } from 'react-native';
+import { ActivityIndicator, Alert, Animated, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import NfcManager, { Ndef, NfcTech } from 'react-native-nfc-manager';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { CUENTA_DESTINO_ID, SUPABASE_FUNCTION_URL, USER_ID_SOLICITANTE } from '@/config';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-
 
 export default function CobrarScreen() {
   const colorScheme = useColorScheme();
@@ -18,6 +17,9 @@ export default function CobrarScreen() {
   const [isProcessing, setIsProcessing] = useState(false);
   const pulseAnim = useState(new Animated.Value(1))[0];
   const [nfcEnabled, setNfcEnabled] = useState(false);
+
+  // State for success card
+  const [successData, setSuccessData] = useState<{ amount: string, newBalance: string, tagInfo: string } | null>(null);
 
   // Inicializar NFC al montar el componente
   useEffect(() => {
@@ -29,7 +31,6 @@ export default function CobrarScreen() {
           return;
         }
 
-        // Verificar si el módulo native está disponible antes de llamar a start
         try {
           await NfcManager.start();
           if (mounted) setNfcEnabled(true);
@@ -46,11 +47,8 @@ export default function CobrarScreen() {
 
     return () => {
       mounted = false;
-      // Limpiar recursos
       if (Platform.OS !== 'web') {
         NfcManager.cancelTechnologyRequest().catch(() => { });
-        // Event listener cleanup not strictly required if cancelled technology request, 
-        // and setEventListener(IsoDep) is invalid in some versions.
       }
     };
   }, []);
@@ -65,7 +63,6 @@ export default function CobrarScreen() {
         ])
       ).start();
 
-      // Iniciar proceso de lectura
       leerNFC();
 
       return () => {
@@ -75,20 +72,18 @@ export default function CobrarScreen() {
         }
       };
     }
-  }, [isScanning]);
+  }, [isScanning, pulseAnim]);
 
   const procesarCobro = async (uid: string, montoCobrar: string, ndefData?: string) => {
-    setIsScanning(false); // Detener UI de escaneo
-    setIsProcessing(true); // Mostrar UI de carga
+    setIsScanning(false);
+    setIsProcessing(true);
 
     try {
       console.log('Iniciando transacción...', { uid, monto: montoCobrar, ndefData });
 
-
-      // Construir URL con parámetros (Query String) como solicita el backend
       const queryParams = new URLSearchParams({
         usuario_id: USER_ID_SOLICITANTE,
-        origen: ndefData || '', // ID de la pulsera (NDEF)
+        origen: ndefData || '',
         destino: CUENTA_DESTINO_ID,
         monto: montoCobrar
       }).toString();
@@ -98,22 +93,24 @@ export default function CobrarScreen() {
 
       const response = await fetch(url, {
         method: 'POST',
-        // No body, ya que los parámetros van en la URL
-        headers: {
-          // Opcional, pero buena práctica si el server espera algo específico, 
-          // aunque para query params no afecta mucho.
-        }
+        headers: {}
       });
 
       const data = await response.json();
       console.log('Respuesta del servidor:', data);
 
       if (response.ok) {
-        Alert.alert(
-          '✅ ¡Cobro Exitoso!',
-          `Nuevo Saldo: $${data.saldo_destino || 'N/A'}\n\nInfo Tag: ${ndefData || 'Sin datos NDEF'}`,
-          [{ text: 'OK', onPress: () => setMonto('') }]
-        );
+        // Success: Show card instead of Alert
+        setSuccessData({
+          amount: montoCobrar,
+          newBalance: data.saldo_destino || 'N/A',
+          tagInfo: ndefData || 'Sin datos NDEF'
+        });
+        setMonto('');
+
+        // FEEDBACK: Haptics
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
       } else {
         throw new Error(data.error || 'Error desconocido del servidor');
       }
@@ -140,22 +137,19 @@ export default function CobrarScreen() {
 
     try {
       console.log('Solicitando detección...');
-      // Solicitamos Ndef para asegurar lectura de mensajes, o NfcA/IsoDep como fallback
       await NfcManager.requestTechnology([NfcTech.Ndef, NfcTech.NfcA, NfcTech.IsoDep]);
 
       const tag = await NfcManager.getTag();
       console.log('Tag encontrado:', tag);
 
-      // DETENER SCANNER INMEDIATAMENTE AL DETECTAR
       await NfcManager.cancelTechnologyRequest();
 
       if (!tag) {
-        return; // O manejar error
+        return;
       }
 
       let ndefText = '';
       if (tag.ndefMessage && tag.ndefMessage.length > 0) {
-        // Decodificar el primer record NDEF si es texto
         const ndefRecord = tag.ndefMessage[0];
         // @ts-ignore
         const text = Ndef.text.decodePayload(ndefRecord.payload);
@@ -163,8 +157,6 @@ export default function CobrarScreen() {
         console.log('NDEF Text decodificado:', text);
       }
 
-      // Procesar el cobro con el ID del tag
-      // Usamos tag.id (UID) como 'origen'
       if (tag.id) {
         await procesarCobro(tag.id, monto, ndefText);
       } else {
@@ -181,7 +173,6 @@ export default function CobrarScreen() {
         Alert.alert('Error NFC', `Error al leer: ${errMsg}`);
       }
     } finally {
-      // Asegurar limpieza
       NfcManager.cancelTechnologyRequest().catch(() => { });
     }
   };
@@ -191,6 +182,7 @@ export default function CobrarScreen() {
       Alert.alert('Error', 'Por favor ingrese un monto válido');
       return;
     }
+    setSuccessData(null); // Reset success state
     setIsScanning(true);
   };
 
@@ -200,242 +192,288 @@ export default function CobrarScreen() {
     NfcManager.cancelTechnologyRequest().catch(() => { });
   };
 
+  const closeSuccessCard = () => {
+    setSuccessData(null);
+  };
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Cobrar 💵</ThemedText>
-      </ThemedView>
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <ThemedText type="title" style={styles.headerTitle}>Cobrar 💵</ThemedText>
+        <Text style={styles.headerId}>ID: {USER_ID_SOLICITANTE.substring(0, 8)}...</Text>
+      </View>
 
-      {!isScanning ? (
-        <ThemedView style={styles.formContainer}>
-          <ThemedText type="subtitle" style={styles.subtitle}>
-            Ingrese el monto a cobrar
-          </ThemedText>
+      <View style={styles.content}>
+        {/* SUCCESS CARD OVERLAY */}
+        {successData && (
+          <View style={styles.successCard}>
+            <View style={styles.successIconContainer}>
+              <IconSymbol size={60} name="checkmark" color="#FFF" />
+            </View>
+            <Text style={styles.successTitle}>¡Cobro Exitoso!</Text>
+            <Text style={styles.successAmount}>S/ {successData.amount}</Text>
 
-          <ThemedView style={styles.inputContainer}>
-            <ThemedText style={styles.currencySymbol}>$</ThemedText>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  color: Colors[colorScheme ?? 'light'].text,
-                  borderColor: Colors[colorScheme ?? 'light'].tabIconDefault,
-                },
+            <View style={styles.successDetails}>
+              <Text style={styles.successLabel}>Nuevo Saldo:</Text>
+              <Text style={styles.successValue}>S/ {successData.newBalance}</Text>
+            </View>
+
+            <Pressable style={styles.successButton} onPress={closeSuccessCard}>
+              <Text style={styles.successButtonText}>Nuevo Cobro</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {/* MAIN FORM */}
+        {!isScanning && !successData && (
+          <View style={styles.formContainer}>
+            <View style={styles.inputWrapper}>
+              <Text style={styles.currencySymbol}>S/</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="0.00"
+                placeholderTextColor="#333"
+                value={monto}
+                onChangeText={setMonto}
+                keyboardType="decimal-pad"
+                maxLength={8}
+                autoFocus
+              />
+            </View>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.primaryButton,
+                pressed && styles.buttonPressed,
               ]}
-              placeholder="0.00"
-              placeholderTextColor={Colors[colorScheme ?? 'light'].tabIconDefault}
-              value={monto}
-              onChangeText={setMonto}
-              keyboardType="decimal-pad"
-              maxLength={10}
-            />
-          </ThemedView>
+              onPress={iniciarCobro}>
+              <Text style={styles.primaryButtonText}>Iniciar Cobro</Text>
+              <IconSymbol size={24} name="arrow.right" color="#000" />
+            </Pressable>
 
-          <Pressable
-            style={({ pressed }) => [
-              styles.button,
-              pressed && styles.buttonPressed,
-            ]}
-            onPress={iniciarCobro}>
-            <IconSymbol size={24} name="arrow.right.circle.fill" color="#fff" />
-            <Text style={styles.buttonText}>Iniciar Cobro</Text>
-          </Pressable>
+            <View style={styles.configInfo}>
+              <Text style={styles.configText}>Cuenta Destino: {CUENTA_DESTINO_ID.substring(0, 12)}...</Text>
+            </View>
+          </View>
+        )}
 
-          <ThemedView style={styles.infoContainer}>
-            <IconSymbol size={20} name="info.circle" color={Colors[colorScheme ?? 'light'].icon} />
-            <ThemedText style={styles.infoText}>
-              Ingrese el monto y presione "Iniciar Cobro", luego acerque la tarjeta Visa.
-            </ThemedText>
-          </ThemedView>
+        {/* SCANNING UI */}
+        {isScanning && (
+          <View style={styles.scanningContainer}>
+            {isProcessing ? (
+              <View style={styles.processingContainer}>
+                <ActivityIndicator size="large" color={Colors.fintech.success} />
+                <Text style={styles.processingText}>Procesando...</Text>
+              </View>
+            ) : (
+              <>
+                <Animated.View style={[styles.pulseCircle, { transform: [{ scale: pulseAnim }] }]}>
+                  <View style={styles.innerCircle}>
+                    <IconSymbol size={64} name="wave.3.right" color={Colors.fintech.success} />
+                  </View>
+                </Animated.View>
 
-          <ThemedView style={{ marginTop: 10, padding: 10, backgroundColor: '#f0f0f0', borderRadius: 8 }}>
-            <Text style={{ fontSize: 10, color: '#666' }}>
-              Configuración: {USER_ID_SOLICITANTE.substring(0, 8)}... → {CUENTA_DESTINO_ID.substring(0, 8)}...
-            </Text>
-          </ThemedView>
+                <Text style={styles.scanningTitle}>Acerque la pulsera NFC ahora...</Text>
+                <Text style={styles.scanningSubtitle}>Monto a cobrar: S/ {monto}</Text>
 
-        </ThemedView>
-      ) : (
-        <ThemedView style={styles.scanningContainer}>
-          {isProcessing ? (
-            <ThemedView style={styles.scanningContainer}>
-              <ActivityIndicator size="large" color={Colors[colorScheme ?? 'light'].tint} />
-              <ThemedText style={styles.scanningTitle}>Procesando Transacción...</ThemedText>
-            </ThemedView>
-          ) : (
-            <>
-              <Animated.View style={[styles.nfcIconContainer, { transform: [{ scale: pulseAnim }] }]}>
-                <IconSymbol
-                  size={120}
-                  name="wave.3.right"
-                  color={Colors[colorScheme ?? 'light'].tint}
-                />
-              </Animated.View>
-
-              <ThemedText type="subtitle" style={styles.scanningTitle}>
-                Acerca la Pulsera/Tag
-              </ThemedText>
-
-              <ThemedText style={styles.scanningText}>
-                Mantén la pulsera cerca del dispositivo.
-              </ThemedText>
-
-              <ThemedView style={styles.montoDisplay}>
-                <ThemedText style={styles.montoLabel}>Monto a cobrar:</ThemedText>
-                <ThemedText type="title" style={styles.montoValue}>
-                  ${monto}
-                </ThemedText>
-              </ThemedView>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.cancelButton,
-                  { borderColor: Colors[colorScheme ?? 'light'].tabIconDefault },
-                  pressed && styles.buttonPressed,
-                ]}
-                onPress={cancelarCobro}>
-                <IconSymbol
-                  size={24}
-                  name="xmark.circle.fill"
-                  color={Colors[colorScheme ?? 'light'].tabIconDefault}
-                />
-                <ThemedText
-                  style={[
-                    styles.cancelButtonText,
-                    { color: Colors[colorScheme ?? 'light'].tabIconDefault },
-                  ]}>
-                  Cancelar
-                </ThemedText>
-              </Pressable>
-            </>
-          )}
-        </ThemedView>
-      )}
-    </ParallaxScrollView>
+                <Pressable style={styles.cancelButton} onPress={cancelarCobro}>
+                  <Text style={styles.cancelButtonText}>Cancelar</Text>
+                </Pressable>
+              </>
+            )}
+          </View>
+        )}
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  container: {
+    flex: 1,
+    backgroundColor: Colors.fintech.background,
   },
-  titleContainer: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 24,
+  header: {
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    marginBottom: 40,
   },
+  headerTitle: {
+    fontSize: 28,
+    color: Colors.fintech.textPrimary,
+  },
+  headerId: {
+    fontSize: 12,
+    color: '#555',
+    marginTop: 4,
+  },
+  content: {
+    flex: 1,
+    paddingHorizontal: 24,
+    justifyContent: 'center', // Center content vertically
+  },
+  // FORM
   formContainer: {
-    gap: 24,
+    width: '100%',
+    alignItems: 'center',
+    gap: 32,
   },
-  subtitle: {
-    marginBottom: 8,
-  },
-  inputContainer: {
+  inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
   },
   currencySymbol: {
-    fontSize: 32,
-    fontWeight: 'bold',
-  },
-  input: {
-    flex: 1,
-    fontSize: 32,
-    fontWeight: 'bold',
-    borderBottomWidth: 2,
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-  },
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    marginTop: 16,
-    backgroundColor: '#0a7ea4',
-  },
-  buttonPressed: {
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  infoContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-    padding: 16,
-    borderRadius: 8,
-    backgroundColor: 'rgba(128, 128, 128, 0.1)',
-  },
-  infoText: {
-    flex: 1,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  scanningContainer: {
-    alignItems: 'center',
-    gap: 24,
-    paddingVertical: 32,
-  },
-  nfcIconContainer: {
-    marginVertical: 32,
-  },
-  scanningTitle: {
-    textAlign: 'center',
-  },
-  scanningText: {
-    textAlign: 'center',
-    fontSize: 16,
-  },
-  montoDisplay: {
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 24,
-    paddingHorizontal: 32,
-    borderRadius: 12,
-    backgroundColor: 'rgba(10, 126, 164, 0.1)',
-    minWidth: 200,
-  },
-  montoLabel: {
-    fontSize: 14,
-    opacity: 0.7,
-  },
-  montoValue: {
     fontSize: 48,
     fontWeight: 'bold',
+    color: Colors.fintech.success,
   },
-  cancelButton: {
+  input: {
+    fontSize: 64,
+    fontWeight: 'bold',
+    color: Colors.fintech.success,
+    minWidth: 120,
+    textAlign: 'center',
+  },
+  primaryButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: Colors.fintech.success,
+    paddingVertical: 20,
+    paddingHorizontal: 40,
+    borderRadius: 16,
+    width: '100%',
     gap: 12,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    borderRadius: 12,
+  },
+  buttonPressed: {
+    opacity: 0.8,
+  },
+  primaryButtonText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#000',
+  },
+  configInfo: {
+    marginTop: 20,
+  },
+  configText: {
+    color: '#333',
+    fontSize: 12,
+  },
+  // SCANNING
+  scanningContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 32,
+  },
+  pulseCircle: {
+    width: 200,
+    height: 200,
+    borderRadius: 100,
     borderWidth: 2,
-    marginTop: 16,
-    backgroundColor: 'transparent',
+    borderColor: Colors.fintech.success,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 255, 136, 0.05)',
+  },
+  innerCircle: {
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  scanningTitle: {
+    fontSize: 20,
+    color: Colors.fintech.textPrimary,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  scanningSubtitle: {
+    fontSize: 16,
+    color: '#888',
+    textAlign: 'center',
+  },
+  cancelButton: {
+    padding: 16,
   },
   cancelButtonText: {
+    color: '#666',
+    fontSize: 16,
+  },
+  processingContainer: {
+    alignItems: 'center',
+    gap: 16,
+  },
+  processingText: {
+    color: Colors.fintech.success,
     fontSize: 18,
+  },
+  // SUCCESS CARD
+  successCard: {
+    backgroundColor: '#1A1A1A',
+    borderRadius: 24,
+    padding: 32,
+    alignItems: 'center',
+    width: '100%',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  successIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: Colors.fintech.success,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  successTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: Colors.fintech.textPrimary,
+    marginBottom: 8,
+  },
+  successAmount: {
+    fontSize: 48,
+    fontWeight: 'bold',
+    color: Colors.fintech.success,
+    marginBottom: 32,
+  },
+  successDetails: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingBottom: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+    marginBottom: 24,
+  },
+  successLabel: {
+    color: '#888',
+    fontSize: 16,
+  },
+  successValue: {
+    color: Colors.fintech.textPrimary,
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  successButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: Colors.fintech.success,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    borderRadius: 12,
+    width: '100%',
+    alignItems: 'center',
+  },
+  successButtonText: {
+    color: Colors.fintech.success,
+    fontSize: 16,
     fontWeight: 'bold',
   },
 });

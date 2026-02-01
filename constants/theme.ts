@@ -25,6 +25,13 @@ export const Colors = {
     tabIconDefault: '#9BA1A6',
     tabIconSelected: tintColorDark,
   },
+  fintech: {
+    background: '#0D0D0D',
+    card: '#1A1A1A',
+    success: '#00FF88',
+    textPrimary: '#FFFFFF',
+    textSecondary: '#A0A0A0',
+  }
 };
 
 export const Fonts = Platform.select({

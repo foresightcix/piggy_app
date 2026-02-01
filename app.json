@@ -23,7 +23,7 @@
       "permissions": [
         "android.permission.NFC"
       ],
-      "package": "com.anonymous.piggy_app"
+      "package": "com.ronaldchicche.piggy_app"
     },
     "web": {
       "output": "static",
