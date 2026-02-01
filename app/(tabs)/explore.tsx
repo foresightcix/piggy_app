@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Alert, Animated, Image, Platform, Pressable, StyleSheet, Text, TextInput } from 'react-native';
-import NfcManager, { NfcTech } from 'react-native-nfc-manager';
+import { ActivityIndicator, Alert, Animated, Image, Platform, Pressable, StyleSheet, Text, TextInput } from 'react-native';
+import NfcManager, { Ndef, NfcTech } from 'react-native-nfc-manager';
 
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
@@ -10,10 +10,12 @@ import { CUENTA_DESTINO_ID, SUPABASE_FUNCTION_URL, USER_ID_SOLICITANTE } from '@
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
+
 export default function CobrarScreen() {
   const colorScheme = useColorScheme();
   const [monto, setMonto] = useState('');
   const [isScanning, setIsScanning] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const pulseAnim = useState(new Animated.Value(1))[0];
   const [nfcEnabled, setNfcEnabled] = useState(false);
 
@@ -47,6 +49,8 @@ export default function CobrarScreen() {
       // Limpiar recursos
       if (Platform.OS !== 'web') {
         NfcManager.cancelTechnologyRequest().catch(() => { });
+        // Event listener cleanup not strictly required if cancelled technology request, 
+        // and setEventListener(IsoDep) is invalid in some versions.
       }
     };
   }, []);
@@ -73,73 +77,111 @@ export default function CobrarScreen() {
     }
   }, [isScanning]);
 
+  const procesarCobro = async (uid: string, montoCobrar: string, ndefData?: string) => {
+    setIsScanning(false); // Detener UI de escaneo
+    setIsProcessing(true); // Mostrar UI de carga
+
+    try {
+      console.log('Iniciando transacción...', { uid, monto: montoCobrar, ndefData });
+
+
+      // Construir URL con parámetros (Query String) como solicita el backend
+      const queryParams = new URLSearchParams({
+        usuario_id: USER_ID_SOLICITANTE,
+        origen: ndefData || '', // ID de la pulsera (NDEF)
+        destino: CUENTA_DESTINO_ID,
+        monto: montoCobrar
+      }).toString();
+
+      const url = `${SUPABASE_FUNCTION_URL}?${queryParams}`;
+      console.log('Enviando petición a:', url);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        // No body, ya que los parámetros van en la URL
+        headers: {
+          // Opcional, pero buena práctica si el server espera algo específico, 
+          // aunque para query params no afecta mucho.
+        }
+      });
+
+      const data = await response.json();
+      console.log('Respuesta del servidor:', data);
+
+      if (response.ok) {
+        Alert.alert(
+          '✅ ¡Cobro Exitoso!',
+          `Nuevo Saldo: $${data.saldo_destino || 'N/A'}\n\nInfo Tag: ${ndefData || 'Sin datos NDEF'}`,
+          [{ text: 'OK', onPress: () => setMonto('') }]
+        );
+      } else {
+        throw new Error(data.error || 'Error desconocido del servidor');
+      }
+
+    } catch (error) {
+      console.error('Error en transacción:', error);
+      Alert.alert('❌ Error en la transacción', String(error));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const leerNFC = async () => {
-    // Si NFC no inicializó correctamente, mostrar advertencia pero intentar continuar simulando o fallando gracefuly
     if (!nfcEnabled && Platform.OS !== 'web') {
-      // Intentamos iniciar de nuevo por si acaso
       try {
         await NfcManager.start();
         setNfcEnabled(true);
       } catch (e) {
-        Alert.alert(
-          'Error de Entorno',
-          'El módulo NFC no está disponible. Si estás usando Expo Go, necesitas un "Development Build" para usar react-native-nfc-manager.\n\nError: ' + String(e)
-        );
+        Alert.alert('Error de Entorno', 'Error al iniciar NFC start(): ' + String(e));
         setIsScanning(false);
         return;
       }
     }
 
     try {
-      console.log('Solicitando tecnología NFC...');
-      // Solicitar tecnología NFC
-      await NfcManager.requestTechnology(NfcTech.Ndef);
+      console.log('Solicitando detección...');
+      // Solicitamos Ndef para asegurar lectura de mensajes, o NfcA/IsoDep como fallback
+      await NfcManager.requestTechnology([NfcTech.Ndef, NfcTech.NfcA, NfcTech.IsoDep]);
 
-      console.log('Esperando tag...');
       const tag = await NfcManager.getTag();
+      console.log('Tag encontrado:', tag);
 
-      console.log('Tag detectado:', tag);
+      // DETENER SCANNER INMEDIATAMENTE AL DETECTAR
+      await NfcManager.cancelTechnologyRequest();
 
-      // Usar las variables de configuración para la futura transacción
-      console.log('Preparando transacción con:', {
-        solicitante: USER_ID_SOLICITANTE,
-        destino: CUENTA_DESTINO_ID,
-        monto: monto,
-        endpoint: SUPABASE_FUNCTION_URL
-      });
-
-      // Preparar informe del tag
-      let reporteTag = '📱 NFC TAG LEÍDO\n\n';
-
-      if (tag) {
-        reporteTag += `ID: ${tag.id}\n`;
-        reporteTag += `Tech: ${JSON.stringify(tag.techTypes)}\n`;
-        reporteTag += `\nRaw Data:\n${JSON.stringify(tag, null, 2)}`;
-      } else {
-        reporteTag += 'Tag detectado es null/undefined';
+      if (!tag) {
+        return; // O manejar error
       }
 
-      setIsScanning(false);
+      let ndefText = '';
+      if (tag.ndefMessage && tag.ndefMessage.length > 0) {
+        // Decodificar el primer record NDEF si es texto
+        const ndefRecord = tag.ndefMessage[0];
+        // @ts-ignore
+        const text = Ndef.text.decodePayload(ndefRecord.payload);
+        ndefText = text;
+        console.log('NDEF Text decodificado:', text);
+      }
 
-      Alert.alert(
-        '✅ Lectura Exitosa',
-        reporteTag + `\n\nDatos de transacción listos para: ${USER_ID_SOLICITANTE}`,
-        [{ text: 'OK', onPress: () => setMonto('') }],
-        { cancelable: false }
-      );
+      // Procesar el cobro con el ID del tag
+      // Usamos tag.id (UID) como 'origen'
+      if (tag.id) {
+        await procesarCobro(tag.id, monto, ndefText);
+      } else {
+        Alert.alert('Error', 'No se pudo obtener el UID del tag.');
+        setIsScanning(false);
+      }
 
     } catch (error: any) {
       console.warn('Excepción en lectura NFC:', error);
       setIsScanning(false);
-      pulseAnim.setValue(1);
 
       const errMsg = String(error);
-      if (errMsg.includes('cancelled') || errMsg.includes('canceled')) {
-        console.log('Cancelado por usuario');
-      } else {
-        Alert.alert('Error NFC', `No se pudo leer el tag.\n\nDetalle: ${errMsg}`);
+      if (!errMsg.includes('cancelled') && !errMsg.includes('canceled')) {
+        Alert.alert('Error NFC', `Error al leer: ${errMsg}`);
       }
     } finally {
+      // Asegurar limpieza
       NfcManager.cancelTechnologyRequest().catch(() => { });
     }
   };
@@ -209,7 +251,7 @@ export default function CobrarScreen() {
           <ThemedView style={styles.infoContainer}>
             <IconSymbol size={20} name="info.circle" color={Colors[colorScheme ?? 'light'].icon} />
             <ThemedText style={styles.infoText}>
-              Ingrese el monto y presione "Iniciar Cobro" para escanear la pulsera.
+              Ingrese el monto y presione "Iniciar Cobro", luego acerque la tarjeta Visa.
             </ThemedText>
           </ThemedView>
 
@@ -218,52 +260,62 @@ export default function CobrarScreen() {
               Configuración: {USER_ID_SOLICITANTE.substring(0, 8)}... → {CUENTA_DESTINO_ID.substring(0, 8)}...
             </Text>
           </ThemedView>
+
         </ThemedView>
       ) : (
         <ThemedView style={styles.scanningContainer}>
-          <Animated.View style={[styles.nfcIconContainer, { transform: [{ scale: pulseAnim }] }]}>
-            <IconSymbol
-              size={120}
-              name="wave.3.right"
-              color={Colors[colorScheme ?? 'light'].tint}
-            />
-          </Animated.View>
+          {isProcessing ? (
+            <ThemedView style={styles.scanningContainer}>
+              <ActivityIndicator size="large" color={Colors[colorScheme ?? 'light'].tint} />
+              <ThemedText style={styles.scanningTitle}>Procesando Transacción...</ThemedText>
+            </ThemedView>
+          ) : (
+            <>
+              <Animated.View style={[styles.nfcIconContainer, { transform: [{ scale: pulseAnim }] }]}>
+                <IconSymbol
+                  size={120}
+                  name="wave.3.right"
+                  color={Colors[colorScheme ?? 'light'].tint}
+                />
+              </Animated.View>
 
-          <ThemedText type="subtitle" style={styles.scanningTitle}>
-            Esperando pulsera NFC...
-          </ThemedText>
+              <ThemedText type="subtitle" style={styles.scanningTitle}>
+                Acerca la Pulsera/Tag
+              </ThemedText>
 
-          <ThemedText style={styles.scanningText}>
-            Acerque el dispositivo para leer
-          </ThemedText>
+              <ThemedText style={styles.scanningText}>
+                Mantén la pulsera cerca del dispositivo.
+              </ThemedText>
 
-          <ThemedView style={styles.montoDisplay}>
-            <ThemedText style={styles.montoLabel}>Monto a cobrar:</ThemedText>
-            <ThemedText type="title" style={styles.montoValue}>
-              ${monto}
-            </ThemedText>
-          </ThemedView>
+              <ThemedView style={styles.montoDisplay}>
+                <ThemedText style={styles.montoLabel}>Monto a cobrar:</ThemedText>
+                <ThemedText type="title" style={styles.montoValue}>
+                  ${monto}
+                </ThemedText>
+              </ThemedView>
 
-          <Pressable
-            style={({ pressed }) => [
-              styles.cancelButton,
-              { borderColor: Colors[colorScheme ?? 'light'].tabIconDefault },
-              pressed && styles.buttonPressed,
-            ]}
-            onPress={cancelarCobro}>
-            <IconSymbol
-              size={24}
-              name="xmark.circle.fill"
-              color={Colors[colorScheme ?? 'light'].tabIconDefault}
-            />
-            <ThemedText
-              style={[
-                styles.cancelButtonText,
-                { color: Colors[colorScheme ?? 'light'].tabIconDefault },
-              ]}>
-              Cancelar
-            </ThemedText>
-          </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.cancelButton,
+                  { borderColor: Colors[colorScheme ?? 'light'].tabIconDefault },
+                  pressed && styles.buttonPressed,
+                ]}
+                onPress={cancelarCobro}>
+                <IconSymbol
+                  size={24}
+                  name="xmark.circle.fill"
+                  color={Colors[colorScheme ?? 'light'].tabIconDefault}
+                />
+                <ThemedText
+                  style={[
+                    styles.cancelButtonText,
+                    { color: Colors[colorScheme ?? 'light'].tabIconDefault },
+                  ]}>
+                  Cancelar
+                </ThemedText>
+              </Pressable>
+            </>
+          )}
         </ThemedView>
       )}
     </ParallaxScrollView>
